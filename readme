@@ -1,0 +1,9 @@
+Run:
+python run_meta.py
+Or:
+python run_symbolic.py
+
+run_meta.py meta-learns local synaptic plasticity
+run_symbolic.py has hard-coded rules for local synaptic plasticity (forward-pass-only optimization)
+
+See attached PDF for details regarding the symbolic hard-coded rules.
