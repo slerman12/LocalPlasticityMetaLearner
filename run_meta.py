@@ -89,7 +89,7 @@ def train(epoch):
     network.train()
 
     # Stats collection
-    c1 = c2 = c3 = y_pred_delta_pos = y_pred_delta_neg = 0
+    c1 = c2 = c3 = total = y_pred_delta_pos = y_pred_delta_neg = 0
 
     for batch_idx, (x, y_label) in enumerate(train_loader):
         x = torch.flatten(x, start_dim=1)
@@ -131,6 +131,7 @@ def train(epoch):
         c1 += (((y_pred_original < y_pred) & (y_label == 1)) |
                ((y_pred_original > y_pred) & (y_label == 0)) |
                ((y_pred_original == y_pred) & (error < 1e-4))).sum()
+        total += y_pred.shape[0]
 
         # if y_pred_original[0].item() < y_pred[0].item():
         #     c2 += 1
@@ -156,13 +157,12 @@ def train(epoch):
             os.makedirs(os.path.dirname('./Results/'), exist_ok=True)
             torch.save(network.state_dict(), './Results/model.pth')
             torch.save(optimizer.state_dict(), './Results/optimizer.pth')
-            total = batch_size * log_interval
             print(" Correct y_pred Delta Sign: {}/{} ({:.3f}%)".format(c1, total, 100. * c1 / total))
             print(" Avg Pos y_pred Delta: {:.5f}".format(y_pred_delta_pos / max(c2, 1)))
             print(" Avg Neg y_pred Delta: {:.5f}".format(y_pred_delta_neg / max(c3, 1)))
 
             # Stats collection
-            c1 = c2 = c3 = y_pred_delta_pos = y_pred_delta_neg = 0
+            c1 = c2 = c3 = total = y_pred_delta_pos = y_pred_delta_neg = 0
 
 
 def test():
