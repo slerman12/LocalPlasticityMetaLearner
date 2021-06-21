@@ -14,12 +14,12 @@ import Meta
 
 n_epochs = 3
 batch_size = 64
-# batch_size = 64
+recurrence_steps = 1
 batch_size_test = 1000
-learning_rate = 1e-4
+learning_rate = 1e-5
 momentum = 0
-# momentum = 0.5
-log_interval = 100 // batch_size
+log_interval = 1
+log_interval *= recurrence_steps
 
 torch.backends.cudnn.enabled = False
 
@@ -69,6 +69,8 @@ test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size_test,
 # network = Meta.Sequential(nn.Linear(784, 128), nn.ReLU(),
 #                         nn.Linear(128, 64), nn.ReLU(),
 #                         nn.Linear(64, 1), nn.Sigmoid())
+# recurrence_steps = 1
+# log_interval /= recurrence_steps
 
 # Meta MLP
 network = Meta.Sequential(Meta.Linear(784, 128), nn.Tanh(),
@@ -89,32 +91,43 @@ def train(epoch):
     network.train()
 
     # Stats collection
-    c1 = c2 = c3 = total = y_pred_delta_pos = y_pred_delta_neg = 0
+    loss_sum = _error_sum = correct = __correct = c1 = c2 = c3 = total = _total = y_pred_delta_pos = y_pred_delta_neg = 0
+
+    sequence = []
 
     for batch_idx, (x, y_label) in enumerate(train_loader):
         x = torch.flatten(x, start_dim=1)
         y_label = y_label.float().unsqueeze(1)
 
         if batch_idx > 0:
-            # Don't want y_pred_original (which is just meant for stats after batch_idx 0) to update network.prev_input
-            network.eval()
+            sequence.append((x, y_label))
+
         y_pred_original = network(x)
-        network.train()
 
         if batch_idx > 0:
-            optimizer.zero_grad()
-            y_pred = network(x, prev_y_label, prev_y_pred, prev_error)
+            y_pred = network(x, prev_y_label, prev_y_pred, prev_error, (batch_idx - 1) % recurrence_steps == 0)
         else:
             y_pred = y_pred_original
 
         error = F.binary_cross_entropy(y_pred, y_label, reduction='none')
         loss = error.mean()
 
-        if batch_idx > 0:
-            loss.backward()
-            optimizer.step()
-
         prev_y_label, prev_y_pred, prev_error = y_label, y_pred, error
+
+        # Meta-Optimization
+        if batch_idx > 0 and batch_idx % recurrence_steps == 0:
+            optimizer.zero_grad()
+            _x_list = [item[0] for item in sequence if item[0].shape[0] == batch_size]
+            _y_label_list = [item[1] for item in sequence if item[1].shape[0] == batch_size]
+            if len(_x_list):
+                _x = torch.cat(_x_list, dim=0)
+                _y_label = torch.cat(_y_label_list, dim=0)
+                _y_pred = network(_x)
+                _error = F.binary_cross_entropy(_y_pred, _y_label, reduction='none')
+                _loss = _error.mean()
+                _loss.backward()
+                optimizer.step()
+                sequence = []
 
         # To test Standard MLP's deltas,
         # uncomment below
@@ -123,22 +136,24 @@ def train(epoch):
 
         # STATS
 
-        # if ((y_pred_original[0] < y_pred[0]) and y_label[0] == 1) or \
-        #         ((y_pred_original[0] > y_pred[0]) and y_label[0] == 0) or \
-        #         (y_pred_original[0] == y_pred[0] and error[0] < 1e-4):
-        #     c1 += 1
+        loss_sum += loss
+
+        y_pred_rounded = y_pred.data.round()
+        _correct = y_pred_rounded.eq(y_label.data)
+        correct += _correct.sum()
+        total += y_pred.shape[0]
+
+        if batch_idx > 0 and batch_idx % recurrence_steps == 0:
+            if len(_x_list):
+                _error_sum += _error.sum()
+                _y_pred_rounded = _y_pred.data.round()
+                ___correct = _y_pred_rounded.eq(_y_label.data)
+                __correct += ___correct.sum()
+                _total += _y_pred.shape[0]
 
         c1 += (((y_pred_original < y_pred) & (y_label == 1)) |
                ((y_pred_original > y_pred) & (y_label == 0)) |
-               ((y_pred_original == y_pred) & (error < 1e-4))).sum()
-        total += y_pred.shape[0]
-
-        # if y_pred_original[0].item() < y_pred[0].item():
-        #     c2 += 1
-        #     y_pred_delta_pos += y_pred[0].item() - y_pred_original[0].item()
-        # if y_pred_original[0].item() > y_pred[0].item():
-        #     c3 += 1
-        #     y_pred_delta_neg -= y_pred_original[0].item() - y_pred[0].item()
+               ((y_pred_original == y_pred) & _correct)).sum()
 
         y_pred_delta_pos += \
             torch.nan_to_num((y_pred[y_pred_original < y_pred] - y_pred_original[y_pred_original < y_pred]).mean())
@@ -150,19 +165,21 @@ def train(epoch):
         if batch_idx % log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(x), len(train_loader.dataset),
-                       100. * batch_idx / len(train_loader), loss.item()))
-            train_losses.append(loss.item())
+                       100. * batch_idx / len(train_loader), _error_sum / max(_total, 1)))
+            print(" Accuracy: {}/{} ({:.0f}%)".format(__correct, _total, 100. * __correct / max(_total, 1)))
+            train_losses.append(_error_sum / max(_total, 1))
             train_counter.append(
-                (batch_idx * 64) + ((epoch-1) * len(train_loader.dataset)))
+                (batch_idx * 64) + ((epoch - 1) * len(train_loader.dataset)))
             os.makedirs(os.path.dirname('./Results/'), exist_ok=True)
             torch.save(network.state_dict(), './Results/model.pth')
             torch.save(optimizer.state_dict(), './Results/optimizer.pth')
             print(" Correct y_pred Delta Sign: {}/{} ({:.3f}%)".format(c1, total, 100. * c1 / total))
-            print(" Avg Pos y_pred Delta: {:.5f}".format(y_pred_delta_pos / max(c2, 1)))
-            print(" Avg Neg y_pred Delta: {:.5f}".format(y_pred_delta_neg / max(c3, 1)))
+            # TODO print params mean and weight mean if both are 0
+            print(" Avg Pos y_pred Delta: {:.10f}".format(y_pred_delta_pos / max(c2, 1)))
+            print(" Avg Neg y_pred Delta: {:.10f}".format(y_pred_delta_neg / max(c3, 1)))
 
             # Stats collection
-            c1 = c2 = c3 = total = y_pred_delta_pos = y_pred_delta_neg = 0
+            loss_sum = correct = _error_sum = __correct = c1 = c2 = c3 = total = _total = y_pred_delta_pos = y_pred_delta_neg = 0
 
 
 def test():

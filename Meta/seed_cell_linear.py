@@ -1,5 +1,7 @@
 import math
+from typing import TypeVar
 import torch
+T = TypeVar('T', bound='Module')
 
 
 class SeedCellLinear(torch.nn.Module):
@@ -85,25 +87,29 @@ class SeedCellLinear(torch.nn.Module):
         #     torch.nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input: torch.Tensor, prev_y_label: torch.Tensor = None, prev_y_pred: torch.Tensor = None,
-                prev_error: torch.Tensor = None, hidden_state_in: torch.Tensor = None) \
-            -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                prev_error: torch.Tensor = None, truncate: bool = False, hidden_state_in: torch.Tensor = None) \
+            -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool, torch.Tensor]:
         # SELF-OPTIMIZATION
         hidden_state = None
+        is_initialized = self.prev_input is not None and self.prev_output is not None
         self_optimizing = prev_y_label is not None and prev_y_pred is not None and prev_error is not None
-        if self_optimizing and self.training:
+        if self_optimizing and is_initialized and self.training:
             prev_batch_size = self.prev_input.shape[0]
+            prev_input = self.prev_input
+            prev_output = self.prev_output
 
             if hidden_state_in is None:
                 hidden_state_in = torch.zeros(prev_batch_size, self.in_features, self.hidden_state_size)
 
-            # Detach to avoid recursion for now
-            prev_input = self.prev_input.detach()
-            prev_output = self.prev_output.detach()
-            prev_y_label = prev_y_label.detach()
-            prev_y_pred = prev_y_pred.detach()
-            prev_error = prev_error.detach()
-            # self.hidden_state = self.hidden_state.detach()
-            self.weight = self.weight.detach()
+            # Detach to truncate recursion
+            if truncate:
+                prev_input = self.prev_input.detach()
+                prev_output = self.prev_output.detach()
+                prev_y_label = prev_y_label.detach()
+                prev_y_pred = prev_y_pred.detach()
+                prev_error = prev_error.detach()
+                # self.hidden_state = self.hidden_state.detach()
+                self.weight = self.weight.detach()
 
             weight = torch.flatten(self.weight.unsqueeze(0).expand(prev_batch_size, -1, -1))[:, None]
             # hidden_state = self.hidden_state.unsqueeze(2).expand(-1, -1, self.in_features, -1).reshape(-1, self.hidden_state_size)
@@ -116,16 +122,14 @@ class SeedCellLinear(torch.nn.Module):
             input_i = torch.flatten(prev_input.unsqueeze(1).expand(-1, self.out_features, -1))[:, None]
             output_j = torch.flatten(prev_output.unsqueeze(2).expand(-1, -1, self.in_features))[:, None]
 
-            # composite = torch.cat([y_label, y_pred, error, weight, hidden_state, hidden_state_in, input_i, output_j], -1)
             composite = torch.cat([y_label, y_pred, error, weight, hidden_state_in, input_i, output_j], -1)
 
             updates = self.meta_net(composite)
             updates = updates.view(prev_batch_size, self.out_features, self.in_features, self.hidden_state_size + 1)
             # updates = torch.normal(mean=updates, std=0.01)
 
-            # print(updates[:, :, -1].mean())
             # Would be faster to use two meta-nets
-            self.weight += updates.mean(0)[:, :, -1].squeeze()
+            self.weight = self.weight + updates.mean(0)[:, :, -1].squeeze()
             # Can make it persistent
             # self.hidden_state += updates.mean(1)[:, :-1]
             hidden_state = updates.mean(2)[:, :, :-1]
@@ -133,13 +137,32 @@ class SeedCellLinear(torch.nn.Module):
         # FORWARD PASS
         output = torch.nn.functional.linear(input, self.weight, self.bias)
 
-        if self.training:
+        if self.training and (self_optimizing or not is_initialized):
             self.prev_input = input
             self.prev_output = output
 
-        return output, prev_y_label, prev_y_pred, prev_error, hidden_state
+        if not self.training:
+            self.prev_input = None
+            self.prev_output = None
+
+        return output, prev_y_label, prev_y_pred, prev_error, truncate, hidden_state
+
+    def eval(self: T) -> T:
+        r"""Sets the module in evaluation mode.
+
+        Also serves to reset self.prev_input and self.prev_output.
+        TODO alternatively could check if self.prev_input matches batch size of prev_y_pred; reset otherwise
+
+        Returns:
+            Module: self
+        """
+        self.prev_input = None
+        self.prev_output = None
+        return super(SeedCellLinear, self).eval()
 
     def extra_repr(self) -> str:
         return 'in_features={}, out_features={}, bias={}, hidden_state_size={}'.format(
             self.in_features, self.out_features, self.bias is not None, self.hidden_state_size
         )
+
+
