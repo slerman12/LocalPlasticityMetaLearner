@@ -104,7 +104,7 @@ class Linear(torch.nn.Module):
             self.hidden_state = self.hidden_state.detach()
             self.hidden_out = self.hidden_out.detach()
         is_initialized = self.prev_input is not None and self.prev_output is not None
-        self_optimizing = len(context) > 0
+        self_optimizing = len(context) == self.seed_cell.context_size
         hidden_out = None
         if self_optimizing and is_initialized and self.training:
             hiddens = (self.hidden_out, self.hidden_state)
