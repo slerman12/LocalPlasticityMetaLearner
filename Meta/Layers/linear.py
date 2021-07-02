@@ -131,11 +131,6 @@ class Linear(torch.nn.Module):
             self.prev_output = output
             self.prev_input = input
 
-        # TODO alternatively could check if self.prev_input matches batch size of prev_y_pred; reset otherwise
-        # if not self.training:
-        #     self.prev_output = None
-        #     self.prev_input = None
-
         return output, context, truncate, hidden_out
 
     def extra_repr(self) -> str:
