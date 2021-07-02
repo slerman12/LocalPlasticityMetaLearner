@@ -12,8 +12,8 @@ import Meta
 
 # HYPERPARAMS
 
-n_epochs = 3
-batch_size = 64
+n_epochs = 3000
+batch_size = 32
 recurrence_steps = 1
 batch_size_test = 1000
 learning_rate = 1e-5
@@ -73,18 +73,33 @@ test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size_test,
 # log_interval /= recurrence_steps
 
 # Meta MLP
-network = Meta.Sequential(Meta.Linear(784, 128), nn.Tanh(),
-                          Meta.Linear(128, 64), nn.Tanh(),
-                          Meta.Linear(64, 1), nn.Sigmoid())
+# Seed Cell (with just SGD)
+# seed_cell = Meta.SeedCell(num_layers=4, hidden_state_size=64, context_size=3)
+# Seed Cell (evolutionary)
+seed_cell = Meta.EvoSeedCell(num_layers=2, hidden_state_size=16, context_size=3, population_size=10, std=1)
+# Single training stage only
+# network = Meta.Sequential(Meta.Linear(seed_cell, 784, 128), nn.Tanh(),
+#                           Meta.Linear(seed_cell, 128, 64), nn.Tanh(),
+#                           Meta.Linear(seed_cell, 64, 1), nn.Sigmoid())
+# Multiple training stages
+network = Meta.MultiSequential(Meta.Linear(seed_cell, 784, 128), nn.Tanh(),
+                               Meta.Linear(seed_cell, 128, 64), nn.Tanh(),
+                               Meta.Linear(seed_cell, 64, 1), nn.Sigmoid(), num_sequentials=2)
 
 # TRAINING
 
 optimizer = optim.SGD(network.parameters(), lr=learning_rate, momentum=momentum)
 # optimizer = optim.Adam(network.parameters(), lr=learning_rate)
 
+# allowing evolutionary seed cell to also be differentiated...
+if hasattr(seed_cell, 'set_optim'):
+    seed_cell.set_optim(optimizer)
+
 train_losses = []
 train_counter = []
 test_losses = []
+context = []
+sequence = []
 
 
 def train(epoch):
@@ -93,41 +108,41 @@ def train(epoch):
     # Stats collection
     loss_sum = _error_sum = correct = __correct = c1 = c2 = c3 = total = _total = y_pred_delta_pos = y_pred_delta_neg = 0
 
-    sequence = []
+    _error = None
 
     for batch_idx, (x, y_label) in enumerate(train_loader):
         x = torch.flatten(x, start_dim=1)
         y_label = y_label.float().unsqueeze(1)
 
-        if batch_idx > 0:
+        batch_idx_total = batch_idx + len(train_loader) * (epoch - 1)
+
+        if batch_idx_total > 0:
             sequence.append((x, y_label))
 
-        y_pred_original = network(x)
+        # having multi sequentials operating at different stages of training
+        if (batch_idx_total - 1) % recurrence_steps == 0 and random.random() > 0.95 and hasattr(network, 'reset_one'):
+            network.reset_one()
 
-        if batch_idx > 0:
-            y_pred = network(x, prev_y_label, prev_y_pred, prev_error, (batch_idx - 1) % recurrence_steps == 0)
-        else:
-            y_pred = y_pred_original
+        y_pred_original = network(x)
+        y_pred = network(x, context, (batch_idx_total - 1) % recurrence_steps == 0)
 
         error = F.binary_cross_entropy(y_pred, y_label, reduction='none')
         loss = error.mean()
-
-        prev_y_label, prev_y_pred, prev_error = y_label, y_pred, error
+        loss_sum += loss
 
         # Meta-Optimization
-        if batch_idx > 0 and batch_idx % recurrence_steps == 0:
+        if batch_idx_total > 0 and batch_idx_total % recurrence_steps == 0:
             optimizer.zero_grad()
-            _x_list = [item[0] for item in sequence if item[0].shape[0] == batch_size]
-            _y_label_list = [item[1] for item in sequence if item[1].shape[0] == batch_size]
-            if len(_x_list):
-                _x = torch.cat(_x_list, dim=0)
-                _y_label = torch.cat(_y_label_list, dim=0)
-                _y_pred = network(_x)
-                _error = F.binary_cross_entropy(_y_pred, _y_label, reduction='none')
-                _loss = _error.mean()
-                _loss.backward()
-                optimizer.step()
-                sequence = []
+            _x = torch.cat([item[0] for item in sequence], dim=0)
+            _y_label = torch.cat([item[1] for item in sequence], dim=0)
+            _y_pred = network(_x)
+            _error = F.binary_cross_entropy(_y_pred, _y_label, reduction='none')
+            _loss = _error.mean() + loss_sum
+            # comment/uncomment for SGD
+            # _loss.backward()
+            # optimizer.step()
+            sequence.clear()
+            loss_sum = 0
 
         # To test Standard MLP's deltas,
         # uncomment below
@@ -136,24 +151,22 @@ def train(epoch):
 
         # STATS
 
-        loss_sum += loss
-
         y_pred_rounded = y_pred.data.round()
         _correct = y_pred_rounded.eq(y_label.data)
         correct += _correct.sum()
         total += y_pred.shape[0]
 
-        if batch_idx > 0 and batch_idx % recurrence_steps == 0:
-            if len(_x_list):
-                _error_sum += _error.sum()
-                _y_pred_rounded = _y_pred.data.round()
-                ___correct = _y_pred_rounded.eq(_y_label.data)
-                __correct += ___correct.sum()
-                _total += _y_pred.shape[0]
+        if batch_idx_total > 0 and batch_idx_total % recurrence_steps == 0:
+            _error_sum += _error.sum()
+            _y_pred_rounded = _y_pred.data.round()
+            ___correct = _y_pred_rounded.eq(_y_label.data)
+            __correct += ___correct.sum()
+            _total += _y_pred.shape[0]
 
         c1 += (((y_pred_original < y_pred) & (y_label == 1)) |
                ((y_pred_original > y_pred) & (y_label == 0)) |
                ((y_pred_original == y_pred) & _correct)).sum()
+        _delta_sign_acc = c1 / total
 
         y_pred_delta_pos += \
             torch.nan_to_num((y_pred[y_pred_original < y_pred] - y_pred_original[y_pred_original < y_pred]).mean())
@@ -161,6 +174,14 @@ def train(epoch):
         y_pred_delta_neg -= \
             torch.nan_to_num((y_pred_original[y_pred_original > y_pred] - y_pred[y_pred_original > y_pred]).mean())
         c3 += (y_pred_original > y_pred).sum()
+
+        y_label_prev, y_pred_prev, error_prev = y_label, y_pred, error
+        # global_error = prev_error if _error is None else _error.view(recurrence_steps, -1, 1).mean(0).detach()
+        # global_error = prev_error if _error is None else _error.view(-1, recurrence_steps, 1).mean(1).detach()
+        # global_error = prev_error if _error is None else _error[0:-1:recurrence_steps].detach()
+        # delta_sign_acc = torch.full_like(error_prev, _delta_sign_acc)
+        context[:] = [y_label_prev, y_pred_prev, error_prev]
+        assert len(context) == seed_cell.context_size
 
         if batch_idx % log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
@@ -174,12 +195,11 @@ def train(epoch):
             torch.save(network.state_dict(), './Results/model.pth')
             torch.save(optimizer.state_dict(), './Results/optimizer.pth')
             print(" Correct y_pred Delta Sign: {}/{} ({:.3f}%)".format(c1, total, 100. * c1 / total))
-            # TODO print params mean and weight mean if both are 0
             print(" Avg Pos y_pred Delta: {:.10f}".format(y_pred_delta_pos / max(c2, 1)))
             print(" Avg Neg y_pred Delta: {:.10f}".format(y_pred_delta_neg / max(c3, 1)))
 
             # Stats collection
-            loss_sum = correct = _error_sum = __correct = c1 = c2 = c3 = total = _total = y_pred_delta_pos = y_pred_delta_neg = 0
+            correct = _error_sum = __correct = c1 = c2 = c3 = total = _total = y_pred_delta_pos = y_pred_delta_neg = 0
 
 
 def test():
