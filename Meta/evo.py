@@ -37,25 +37,32 @@ class EvoSeedCell(torch.nn.Module):
             -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
         # assumes error is last element of context
         error = context[-1].mean()
+        # "kill" criteria is set to error increasing over previous error
         if error > self.prev_error:
+            # "kill" by setting is_alive variable to False
             for seed_cell in self.cache:
                 seed_cell.is_alive = False
             living_cells = [seed_cell for seed_cell in self.population if seed_cell.is_alive]
+            # replace dead cells with mutations of living ones
             for i, seed_cell in enumerate(self.population):
                 if not seed_cell.is_alive:
                     new_seed_cell = self.mutate(random.choice(living_cells))
                     self.population[i] = new_seed_cell
                     setattr(new_seed_cell, 'is_alive', True)
+                    # below is just for making this differentiable
                     for j, param in enumerate(new_seed_cell.parameters()):
                         self.register_parameter("param_{}_{}".format(i, j), param)
                         if self.optimizer is not None:
                             # does this continue increasing in memory indefinitely?
                             self.optimizer.add_param_group({"params": param})
 
+        # if the context has changed, clear the cache of recently used seed cells
         if self.prev_error != error:
             self.cache.clear()
         self.prev_error = error
+        # randomly sample a seed cell from the population of seed cells
         seed_cell = random.choice(self.population)
+        # add it to recently used
         self.cache.append(seed_cell)
 
         return seed_cell(context, hiddens, prev_output, prev_input, hidden_in)
