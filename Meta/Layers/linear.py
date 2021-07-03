@@ -93,18 +93,17 @@ class Linear(torch.nn.Module):
     def forward(self, input: torch.Tensor, context=None, truncate: bool = False, hidden_in: torch.Tensor = None) \
             -> tuple[torch.Tensor, list, bool, torch.Tensor]:
         # SELF-OPTIMIZATION
-        if context is None:
-            context = []
+        is_initialized = self.prev_input is not None and self.prev_output is not None
+        self_optimizing = context is not None and len(context) == self.seed_cell.context_size
         # Detach to truncate recursion
         if truncate:
+            if self_optimizing:
+                context = [data.detach() for data in context]
             self.prev_input = self.prev_input.detach()
             self.prev_output = self.prev_output.detach()
-            context = [data.detach() for data in context]
             self.weight = self.weight.detach()
             self.hidden_state = self.hidden_state.detach()
             self.hidden_out = self.hidden_out.detach()
-        is_initialized = self.prev_input is not None and self.prev_output is not None
-        self_optimizing = len(context) == self.seed_cell.context_size
         hidden_out = None
         if self_optimizing and is_initialized and self.training:
             hiddens = (self.hidden_out, self.hidden_state)
